@@ -1,27 +1,32 @@
 # AI Employee Face Recognition System
 
-An enterprise-ready prototype for employee face registration and real-time detection, built for internal textile-company onboarding and monitoring. All authoritative biometric evaluation — face detection, pose/blur/duplicate quality checks, embedding generation, and identity matching — runs **server-side**. The browser never performs recognition; it only runs a lightweight client-side detector for live visual guidance during registration.
+An enterprise-ready prototype for employee face registration and real-time detection, built for internal textile-company onboarding and monitoring.
+
+All authoritative biometric evaluation — face detection, pose/blur/duplicate quality checks, embedding generation, and identity matching — runs **server-side**. The browser never performs recognition; it only runs a lightweight client-side detector for live visual guidance during registration.
+
+> **Design principle:** *client suggests, server decides.* The browser's overlay is just visual feedback — every frame that counts, and every recognition decision, is independently re-validated by the backend.
 
 ---
 
 ## Table of Contents
 
-1. [Architecture](#architecture)
-2. [Technology Stack](#technology-stack)
-3. [Models](#models)
-4. [Project Structure](#project-structure)
-5. [Setup & Installation](#setup--installation)
-6. [API Reference](#api-reference)
-7. [Database Schema](#database-schema)
-8. [Configuration](#configuration)
-9. [Core Algorithms](#core-algorithms)
-10. [Challenges Encountered & How They Were Solved](#challenges-encountered--how-they-were-solved)
-11. [Biometric Data Compliance](#-biometric-data-compliance-note)
-12. [Known Limitations](#known-limitations)
+- [Overview](#overview)
+- [How It Works](#how-it-works)
+- [Tech Stack](#tech-stack)
+- [Models](#models)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+- [API Reference](#api-reference)
+- [Database Schema](#database-schema)
+- [Configuration](#configuration)
+- [Core Algorithms](#core-algorithms)
+- [Biometric Data Compliance](#-biometric-data-compliance)
+- [Known Limitations](#known-limitations)
+- [Development Notes: Challenges & Fixes](#development-notes-challenges--fixes)
 
 ---
 
-## Architecture
+## Overview
 
 ```
   Browser (Next.js 14)                         FastAPI Backend
@@ -45,26 +50,32 @@ An enterprise-ready prototype for employee face registration and real-time detec
                                                     SQLite, embeddings as float32 BLOBs
 ```
 
-**Design principle: client suggests, server decides.** The browser's MediaPipe overlay exists purely to give the user real-time visual feedback (oval turns green when well-framed) so registration feels responsive. Every frame that actually counts toward a captured pose, and every recognition decision on the Detect page, is independently re-validated by the FastAPI backend using SCRFD + ArcFace — the client never gets to assert "this is employee X" on its own.
+## How It Works
 
-### Data flow: registration
-1. User fills employee ID/name/department, webcam starts.
-2. Client-side MediaPipe (`@mediapipe/face_detection`, loaded from CDN) tracks the face locally and drives the oval overlay (gray → yellow → green) plus the 5-step prompt sequence (front, left, right, up, down).
-3. When the oval is green, the browser throttles calls (~2/sec) to `POST /api/employees/register/check-frame`, sending a JPEG frame as base64.
-4. The backend runs real SCRFD detection + blur (Laplacian variance) + pose estimation (landmark geometry) and returns whether the frame is acceptable and what pose it actually shows.
-5. Once a step's frame quota is met, the flow advances to the next pose; after all 5 steps (20 frames total) the batch is submitted to `POST /api/employees/register`.
-6. The backend re-runs detection on every frame, discards blurry frames, discards near-duplicate frames (cosine similarity > 0.95 against already-accepted frames in the batch), embeds the rest with ArcFace, averages and L2-normalizes the embeddings into one 512-dim vector, and stores it (plus a cropped thumbnail) in SQLite.
+### 1. Registration flow
 
-### Data flow: live detection
-1. Detect page starts the webcam and opens a WebSocket to `/api/recognize/stream`.
-2. The client sends a JPEG frame (base64) roughly every 250ms — no local recognition logic at all.
-3. The backend decodes the frame, runs SCRFD to find the largest face, embeds it with ArcFace, and computes cosine similarity against every stored employee embedding.
-4. If the best match's similarity ≥ `SIMILARITY_THRESHOLD` (default 0.55), it returns `VERIFIED` with the employee's name/department/confidence; otherwise `UNKNOWN`.
-5. Logging is **presence-based, not per-frame**: the backend tracks who is currently in frame and only writes a log entry (+ snapshot) when that changes — a new person steps in, or the same person leaves for more than `PRESENCE_TIMEOUT_SECONDS` (default 4s) and returns. A person standing continuously in front of the camera is logged once for that visit, not once per frame.
+| Step | What happens |
+|---|---|
+| 1 | User fills in employee ID / name / department; webcam starts. |
+| 2 | Client-side MediaPipe (`@mediapipe/face_detection`, CDN) tracks the face locally and drives the oval overlay (gray → yellow → green) plus a 5-step prompt sequence (front, left, right, up, down). |
+| 3 | When the oval is green, the browser throttles calls (~2/sec) to `POST /api/employees/register/check-frame`, sending a JPEG frame as base64. |
+| 4 | The backend runs real SCRFD detection + blur check (Laplacian variance) + pose estimation, and returns whether the frame is acceptable and what pose it shows. |
+| 5 | Once a step's quota is met, the flow advances; after all 5 steps (20 frames total) the batch is submitted to `POST /api/employees/register`. |
+| 6 | The backend re-runs detection on every frame, discards blurry or near-duplicate frames (cosine similarity > 0.95), embeds the rest with ArcFace, averages + L2-normalizes into one 512-dim vector, and stores it with a cropped thumbnail in SQLite. |
+
+### 2. Live detection flow
+
+| Step | What happens |
+|---|---|
+| 1 | Detect page starts the webcam and opens a WebSocket to `/api/recognize/stream`. |
+| 2 | The client sends a JPEG frame (base64) roughly every 250ms — no local recognition logic at all. |
+| 3 | The backend decodes the frame, runs SCRFD to find the largest face, embeds it with ArcFace, and computes cosine similarity against every stored employee embedding. |
+| 4 | If the best match's similarity ≥ `SIMILARITY_THRESHOLD` (default `0.55`), it returns `VERIFIED` with name/department/confidence; otherwise `UNKNOWN`. |
+| 5 | Logging is **presence-based, not per-frame**: a log entry (+ snapshot) is only written when who's in frame *changes* — someone new steps in, or the same person leaves for more than `PRESENCE_TIMEOUT_SECONDS` (default 4s) and returns. Someone standing continuously in front of the camera is logged once per visit, not once per frame. |
 
 ---
 
-## Technology Stack
+## Tech Stack
 
 | Layer | Technology | Version | Purpose |
 |---|---|---|---|
@@ -72,7 +83,7 @@ An enterprise-ready prototype for employee face registration and real-time detec
 | UI runtime | React | 18.3.1 | Component rendering |
 | Language | TypeScript | ^5.4.5 | Type-checked frontend |
 | Styling | Tailwind CSS | ^3.4.4 | Utility-first styling |
-| Client-side face guidance | MediaPipe Face Detection | CDN (`@mediapipe/face_detection`, `@mediapipe/camera_utils`) | Live oval-alignment overlay only — not used for actual recognition |
+| Client-side face guidance | MediaPipe Face Detection | CDN (`@mediapipe/face_detection`, `@mediapipe/camera_utils`) | Live oval-alignment overlay only — never used for actual recognition |
 | Backend framework | FastAPI | 0.111.0 | REST + WebSocket API |
 | ASGI server | Uvicorn | 0.30.1 | Runs the FastAPI app |
 | Inference runtime | ONNX Runtime | 1.18.0 | Runs SCRFD + ArcFace `.onnx` models directly (CPU by default, GPU-capable) |
@@ -80,9 +91,9 @@ An enterprise-ready prototype for employee face registration and real-time detec
 | Numerics | NumPy | 1.26.4 | Array math, embedding vectors |
 | Config | Pydantic / pydantic-settings | 2.7.4 / 2.3.4 | Typed env-var configuration |
 | Database | SQLite (stdlib `sqlite3`) | — | Employee records + recognition logs |
-| Realtime transport | WebSockets (`websockets` lib via FastAPI) | 12.0 | Live recognition stream |
+| Realtime transport | WebSockets (`websockets` via FastAPI) | 12.0 | Live recognition stream |
 
-**Deliberately not used:** the `insightface` PyPI package. See [Challenges](#challenges-encountered--how-they-were-solved) below — it requires an MSVC/C++ build toolchain on Windows, so the backend instead loads the same underlying `.onnx` model files directly through `onnxruntime` and reimplements SCRFD's output decoding and ArcFace's face-alignment preprocessing itself.
+> **Note:** the `insightface` PyPI package is deliberately **not** used — it requires an MSVC/C++ build toolchain on Windows. Instead, the backend loads the same `.onnx` model files directly through `onnxruntime` and reimplements SCRFD's output decoding and ArcFace's alignment preprocessing itself. See [Development Notes](#development-notes-challenges--fixes) for the full story.
 
 ---
 
@@ -92,12 +103,12 @@ Both models come from the **`buffalo_l`** pack in the [InsightFace model zoo](ht
 
 | Model file | Role | Architecture | Output |
 |---|---|---|---|
-| `det_10g.onnx` | Face **detection** | SCRFD (Sample and Computation Redistribution for Face Detection), 3 FPN scales (strides 8/16/32), 2 anchors/location | Per-anchor confidence score, bbox offsets, and 5-point landmark offsets (left eye, right eye, nose, left mouth corner, right mouth corner) |
-| `w600k_r50.onnx` | Face **recognition** | ArcFace embedding head on a ResNet-50 backbone | 512-dim float32 embedding, L2-normalized so cosine similarity = dot product |
+| `det_10g.onnx` | Face **detection** | SCRFD, 3 FPN scales (strides 8/16/32), 2 anchors/location | Per-anchor confidence score, bbox offsets, and 5-point landmark offsets (eyes, nose, mouth corners) |
+| `w600k_r50.onnx` | Face **recognition** | ArcFace head on a ResNet-50 backbone | 512-dim float32 embedding, L2-normalized so cosine similarity = dot product |
 
-Also present in the downloaded `buffalo_l` pack but **unused** by this project (harmless to leave on disk): `1k3d68.onnx` (3D landmarks), `2d106det.onnx` (dense 2D landmarks), `genderage.onnx` (gender/age estimation).
+Also present in the downloaded `buffalo_l` pack but **unused** (harmless to leave on disk): `1k3d68.onnx` (3D landmarks), `2d106det.onnx` (dense 2D landmarks), `genderage.onnx` (gender/age estimation).
 
-**Client-side only:** MediaPipe's bundled "short-range" `BlazeFace`-derived face detection model, loaded from `cdn.jsdelivr.net` at runtime — used exclusively to drive the registration page's live oval overlay; its output never reaches the server or influences any stored data.
+**Client-side only:** MediaPipe's bundled "short-range" BlazeFace-derived detector, loaded from `cdn.jsdelivr.net` at runtime — used exclusively for the registration page's live oval overlay. Its output never reaches the server or influences any stored data.
 
 ---
 
@@ -107,7 +118,7 @@ Also present in the downloaded `buffalo_l` pack but **unused** by this project (
 /
 ├── backend/
 │   ├── app/
-│   │   ├── main.py                 # FastAPI app: REST endpoints + WebSocket
+│   │   ├── main.py                  # FastAPI app: REST endpoints + WebSocket
 │   │   ├── config.py                # Pydantic settings (env-var driven)
 │   │   ├── database.py              # SQLite schema + CRUD helpers
 │   │   └── services/
@@ -116,11 +127,11 @@ Also present in the downloaded `buffalo_l` pack but **unused** by this project (
 │   │   └── test_face_service.py     # Unit tests (pose-estimation geometry)
 │   ├── download_models.py           # Fetches & extracts the buffalo_l ONNX pack
 │   ├── requirements.txt             # Pinned Python dependencies
-│   └── data/                        # Generated at runtime (gitignored-worthy):
+│   └── data/                        # Generated at runtime (gitignore-worthy):
 │       ├── employees.db             #   SQLite database
 │       ├── models/buffalo_l/        #   Downloaded .onnx model files
-│       ├── thumbnails/               #   Per-employee profile thumbnail JPEGs
-│       └── snapshots/                #   Per-recognition-event snapshot JPEGs
+│       ├── thumbnails/              #   Per-employee profile thumbnail JPEGs
+│       └── snapshots/               #   Per-recognition-event snapshot JPEGs
 └── frontend/
     ├── src/app/
     │   ├── layout.tsx               # Sidebar nav + page shell
@@ -135,9 +146,9 @@ Also present in the downloaded `buffalo_l` pack but **unused** by this project (
 
 ---
 
-## Setup & Installation
+## Getting Started
 
-### 1. Backend
+### 1. Backend setup
 
 ```powershell
 cd backend
@@ -156,7 +167,7 @@ No C++/MSVC build toolchain is required — every dependency (`onnxruntime`, `op
 python download_models.py
 ```
 
-Downloads `buffalo_l.zip` (~275MB) from the InsightFace GitHub releases and extracts `det_10g.onnx` + `w600k_r50.onnx` (plus the unused extras) into `backend/data/models/buffalo_l/`. Safe to re-run — it skips the download if the required files already exist.
+Downloads `buffalo_l.zip` (~275MB) from the InsightFace GitHub releases and extracts `det_10g.onnx` + `w600k_r50.onnx` (plus unused extras) into `backend/data/models/buffalo_l/`. Safe to re-run — it skips the download if the required files already exist.
 
 ### 3. Start the backend
 
@@ -166,7 +177,7 @@ python -m uvicorn app.main:app --reload --port 8000
 
 The SQLite database and `data/thumbnails` / `data/snapshots` folders are created automatically on first run.
 
-### 4. Frontend
+### 4. Frontend setup
 
 ```powershell
 cd frontend
@@ -174,9 +185,13 @@ npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000). `/api/*` and `/static/*` requests are proxied to the backend on port 8000 via `next.config.mjs` rewrites, and WebSocket connections (`/api/recognize/stream`) go **directly** to `ws://127.0.0.1:8000` from the browser, since Next's dev-server rewrites don't proxy WebSocket upgrades. Both the rewrite destinations and the WebSocket URL deliberately use `127.0.0.1`, not `localhost` — see [Challenges #14](#challenges-encountered--how-they-were-solved) if you're curious why that matters (short version: it avoids a real, multi-second-per-request lag on Windows).
+Open **[http://localhost:3000](http://localhost:3000)**.
 
-> If port 8000 or 3000 is already in use on your machine, start the backend/frontend on different ports and update `next.config.mjs`'s rewrite destinations and the `wsUrl` in `detect/page.tsx` to match.
+- `/api/*` and `/static/*` requests are proxied to the backend on port 8000 via `next.config.mjs` rewrites.
+- WebSocket connections (`/api/recognize/stream`) go **directly** to `ws://127.0.0.1:8000` from the browser, since Next's dev-server rewrites don't proxy WebSocket upgrades.
+- Both the rewrite destinations and the WebSocket URL deliberately use `127.0.0.1`, not `localhost` — this avoids a real, multi-second-per-request lag on Windows (see [item #14](#development-notes-challenges--fixes)).
+
+> **Port already in use?** Start the backend/frontend on different ports and update `next.config.mjs`'s rewrite destinations and the `wsUrl` in `detect/page.tsx` to match.
 
 ---
 
@@ -199,6 +214,7 @@ Open [http://localhost:3000](http://localhost:3000). `/api/*` and `/static/*` re
 ## Database Schema
 
 **`employees`**
+
 | Column | Type | Notes |
 |---|---|---|
 | `id` | TEXT PK | Employee ID (user-supplied) |
@@ -208,6 +224,7 @@ Open [http://localhost:3000](http://localhost:3000). `/api/*` and `/static/*` re
 | `embedding` | BLOB | 512 × float32, raw bytes (2048 bytes), L2-normalized |
 
 **`recognition_logs`**
+
 | Column | Type | Notes |
 |---|---|---|
 | `id` | INTEGER PK AUTOINCREMENT | |
@@ -231,12 +248,14 @@ MODEL_DIR="./data/models/buffalo_l"
 
 SIMILARITY_THRESHOLD=0.55         # Cosine similarity threshold to call a match VERIFIED
 MIN_CAPTURE_FRAMES=20             # Total frames required across all 5 registration steps
-LAPLACIAN_THRESHOLD=80.0          # Blur rejection threshold (lower = blur allowed through)
+LAPLACIAN_THRESHOLD=80.0          # Blur rejection threshold (lower = more blur allowed through)
 PRESENCE_TIMEOUT_SECONDS=4.0      # How long someone must be gone before their next detection counts as a new visit
 ```
 
 ### CPU vs. GPU inference
-By default both ONNX sessions use `CPUExecutionProvider`. To use an NVIDIA GPU:
+
+By default, both ONNX sessions use `CPUExecutionProvider`. To use an NVIDIA GPU:
+
 1. `pip uninstall onnxruntime && pip install onnxruntime-gpu`
 2. In `backend/app/services/face_service.py`, change `providers=["CPUExecutionProvider"]` (in both `SCRFDDetector.__init__` and `ArcFaceEmbedder.__init__`) to `providers=["CUDAExecutionProvider", "CPUExecutionProvider"]`.
 
@@ -246,17 +265,45 @@ If CUDA drivers aren't present, `onnxruntime-gpu` falls back to CPU automaticall
 
 ## Core Algorithms
 
-- **SCRFD decoding** (`SCRFDDetector.detect`): letterbox-resizes the frame to 640×640, runs the ONNX graph, and manually decodes its 9 raw outputs (score/bbox/landmark tensors × 3 FPN strides) using anchor-center generation, `distance2bbox`/`distance2kps` transforms, and greedy NMS (IoU 0.4) — the same decoding logic InsightFace's own `model_zoo.SCRFD` implements internally.
-- **ArcFace alignment** (`ArcFaceEmbedder.align`): estimates a similarity transform (`cv2.estimateAffinePartial2D`) mapping the detected 5-point landmarks onto the canonical 112×112 ArcFace reference template, warps the crop, then runs it through the ResNet-50 embedding head and L2-normalizes the output.
-- **Blur detection**: variance of the Laplacian of the grayscale face crop; below `LAPLACIAN_THRESHOLD` the frame is rejected as too blurry.
-- **Pose estimation**: purely geometric, from the 5 landmarks — `yaw_ratio = (nose.x − left_eye.x) / (right_eye.x − nose.x)` classifies left/right, `pitch_ratio = (nose.y − eye_midpoint.y) / (mouth_midpoint.y − nose.y)` classifies up/down. Thresholds were calibrated against the ArcFace reference template's own geometry (a true front-facing face has pitch_ratio ≈ 0.98), not arbitrary guesses.
-- **Duplicate rejection**: within one registration batch, a candidate frame's embedding is compared (cosine similarity) against every already-accepted embedding; anything above 0.95 similarity is treated as a near-duplicate and dropped so the averaged embedding isn't skewed by many near-identical frames.
+- **SCRFD decoding** (`SCRFDDetector.detect`) — letterbox-resizes the frame to 640×640, runs the ONNX graph, and manually decodes its 9 raw outputs (score/bbox/landmark tensors × 3 FPN strides) using anchor-center generation, `distance2bbox`/`distance2kps` transforms, and greedy NMS (IoU 0.4) — the same decoding logic InsightFace's own `model_zoo.SCRFD` implements internally.
+- **ArcFace alignment** (`ArcFaceEmbedder.align`) — estimates a similarity transform (`cv2.estimateAffinePartial2D`) mapping the detected 5-point landmarks onto the canonical 112×112 ArcFace reference template, warps the crop, runs it through the ResNet-50 embedding head, and L2-normalizes the output.
+- **Blur detection** — variance of the Laplacian of the grayscale face crop; below `LAPLACIAN_THRESHOLD` the frame is rejected as too blurry.
+- **Pose estimation** — purely geometric, from the 5 landmarks:
+  - `yaw_ratio = (nose.x − left_eye.x) / (right_eye.x − nose.x)` classifies left/right
+  - `pitch_ratio = (nose.y − eye_midpoint.y) / (mouth_midpoint.y − nose.y)` classifies up/down
+  - Thresholds were calibrated against the ArcFace reference template's own geometry (a true front-facing face has `pitch_ratio ≈ 0.98`), not arbitrary guesses.
+- **Duplicate rejection** — within one registration batch, a candidate frame's embedding is compared (cosine similarity) against every already-accepted embedding; anything above `0.95` similarity is treated as a near-duplicate and dropped, so the averaged embedding isn't skewed by many near-identical frames.
 
 ---
 
-## Challenges Encountered & How They Were Solved
+## 🔒 Biometric Data Compliance
 
-This project went through a real debugging pass, not just a paper design — several issues only surfaced by actually installing dependencies, downloading real models, and driving the UI with a live webcam.
+> [!WARNING]
+> **Production Compliance Requirements**
+>
+> Because this system processes and stores biometric data (face embeddings and images), deploying it in production requires adherence to applicable legal frameworks — e.g. **GDPR Article 9** (EU), **BIPA** (Illinois, USA), or local labor law equivalents. At minimum, a production release should add:
+>
+> 1. **Explicit consent handling** — signed, written consent from each employee describing how their face data is captured, analyzed, and verified.
+> 2. **Data retention policy** — embeddings and images deleted promptly on termination or after a defined retention window.
+> 3. **Encryption at rest and in transit** — encrypt the SQLite file/backups; run all traffic over HTTPS/WSS, not plain HTTP/WS.
+> 4. **Data portability/erasure** — a clear mechanism for an employee to request deletion or export of their own biometric record.
+
+---
+
+## Known Limitations
+
+- **No authentication/authorization** on any API endpoint — anyone who can reach the backend can register, delete employees, or read logs. Add an auth layer before exposing this beyond localhost.
+- **CORS is wide open** (`allow_origins=["*"]`) — fine for local development, not for production.
+- **No rate limiting** on the WebSocket stream or registration endpoints.
+- **SQLite** is fine for a single-instance prototype; a multi-instance/production deployment would need a real database and a proper vector index (e.g. FAISS/pgvector) instead of a linear per-request scan over all employee embeddings.
+- **CPU inference by default** — SCRFD + ArcFace on CPU is fine for a handful of concurrent recognitions but will bottleneck at scale; see the [GPU section](#cpu-vs-gpu-inference) above.
+
+---
+
+## Development Notes: Challenges & Fixes
+
+<details>
+<summary>This project went through a real debugging pass, not just a paper design — click to expand the 14 issues found and fixed along the way.</summary>
 
 1. **`insightface` package vs. Windows.** The original scaffold imported the full `insightface` Python package (`FaceAnalysis`), which needs an MSVC/C++ compiler to build on Windows and wasn't even listed in `requirements.txt` — so face recognition could never actually initialize. **Fix:** rewrote `face_service.py` to load `det_10g.onnx` and `w600k_r50.onnx` directly via `onnxruntime`, reimplementing SCRFD's multi-scale output decoding and ArcFace's landmark-based alignment from scratch. Verified end-to-end against a real photo (unit-norm 512-dim embedding, self-similarity ≈ 1.0, flipped-face similarity ≈ 0.91).
 
@@ -284,28 +331,6 @@ This project went through a real debugging pass, not just a paper design — sev
 
 13. **Registration's per-frame quality check was computing (and discarding) a full face embedding it never used.** `check_frame` only needs blur score, pose, and bbox to validate a frame — never identity — but `detect_faces()` unconditionally ran the ArcFace embedding step for every detected face regardless of whether the caller needed it. Benchmarked on the dev machine: SCRFD detection alone ≈200ms, ArcFace embedding ≈250ms on top of that — so `check_frame` was paying for embedding computation that made every single poll during the 5-step guided capture (fired every ~500ms) roughly twice as slow as necessary. Fixed by adding a `compute_embeddings` flag to `detect_faces()` and skipping it in `check_frame` and in the registration thumbnail-crop lookup (also identity-agnostic), roughly halving their latency.
 
-14. **A ~2 second phantom delay on nearly every request, only on Windows.** Measured server-side timing showed `check_frame` actually completing in ~140ms, but the client (and, critically, the browser through Next.js's dev-server proxy) was seeing ~2.2-3s round trips. Root cause: resolving the hostname `"localhost"` returns the IPv6 loopback (`::1`) *before* the IPv4 loopback (`127.0.0.1`) on this system, and since uvicorn only binds to the IPv4 address, any client that tries addresses in that order (confirmed for both Python's `urllib` and, very plausibly, Node.js - which is what actually performs the proxied request for Next's `next.config.mjs` rewrites) stalls waiting for the IPv6 connection attempt to fail before falling back to IPv4. This single issue plausibly accounted for the bulk of reported "sometimes laggy" / "registration is slow and hectic" symptoms, since the register page polls `check-frame` roughly twice a second - each poll paying this ~2s tax. **Fix:** use `127.0.0.1` explicitly instead of `"localhost"` in `next.config.mjs`'s rewrite destinations and in the Detect page's WebSocket URL, bypassing hostname resolution entirely. Confirmed via direct measurement: identical requests dropped from ~2200ms to ~150-190ms after the change.
+14. **A ~2 second phantom delay on nearly every request, only on Windows.** Measured server-side timing showed `check_frame` actually completing in ~140ms, but the client (and, critically, the browser through Next.js's dev-server proxy) was seeing ~2.2-3s round trips. Root cause: resolving the hostname `"localhost"` returns the IPv6 loopback (`::1`) *before* the IPv4 loopback (`127.0.0.1`) on this system, and since uvicorn only binds to the IPv4 address, any client that tries addresses in that order (confirmed for both Python's `urllib` and, very plausibly, Node.js — which is what actually performs the proxied request for Next's `next.config.mjs` rewrites) stalls waiting for the IPv6 connection attempt to fail before falling back to IPv4. This single issue plausibly accounted for the bulk of reported "sometimes laggy" / "registration is slow and hectic" symptoms, since the register page polls `check-frame` roughly twice a second — each poll paying this ~2s tax. **Fix:** use `127.0.0.1` explicitly instead of `"localhost"` in `next.config.mjs`'s rewrite destinations and in the Detect page's WebSocket URL, bypassing hostname resolution entirely. Confirmed via direct measurement: identical requests dropped from ~2200ms to ~150-190ms after the change.
 
----
-
-## 🔒 Biometric Data Compliance Note
-
-> [!WARNING]
-> **Production Compliance Requirements**
->
-> Because this system processes and stores biometric data (face embeddings and images), deploying it in production requires adherence to applicable legal frameworks — e.g. **GDPR Article 9** (EU), **BIPA** (Illinois, USA), or local labor law equivalents. At minimum, a production release should add:
->
-> 1. **Explicit consent handling** — signed, written consent from each employee describing how their face data is captured, analyzed, and verified.
-> 2. **Data retention policy** — embeddings and images deleted promptly on termination or after a defined retention window.
-> 3. **Encryption at rest and in transit** — encrypt the SQLite file/backups; run all traffic over HTTPS/WSS, not plain HTTP/WS.
-> 4. **Data portability/erasure** — a clear mechanism for an employee to request deletion or export of their own biometric record.
-
----
-
-## Known Limitations
-
-- **No authentication/authorization** on any API endpoint — anyone who can reach the backend can register, delete employees, or read logs. Add an auth layer before exposing this beyond localhost.
-- **CORS is wide open** (`allow_origins=["*"]`) — fine for local development, not for production.
-- **No rate limiting** on the WebSocket stream or registration endpoints.
-- **SQLite** is fine for a single-instance prototype; a multi-instance/production deployment would need a real database and a proper vector index (e.g. FAISS/pgvector) instead of a linear per-request scan over all employee embeddings.
-- **CPU inference by default** — SCRFD + ArcFace on CPU is fine for a handful of concurrent recognitions but will bottleneck at scale; see the GPU section above.
+</details>
